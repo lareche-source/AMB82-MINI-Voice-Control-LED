@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "啟動 AMB82 語音控制（自動偵測 COM）",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/1.py",
+      "console": "integratedTerminal",
+      "args": []
+    }
+  ]
+}

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ameba Mini 語音控制 LED</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#edf2f7;color:#17253b;margin:0;padding:24px}
+main{max-width:640px;margin:32px auto;background:white;padding:28px;border-radius:20px}
+h1{font-size:1.7rem}button,input{font:inherit;padding:12px;border-radius:8px;border:1px solid #8190a6}
+button{cursor:pointer;background:#eaf0fa}button:disabled{opacity:.5;cursor:wait}
+.lights{display:flex;gap:16px;margin:24px 0}.light{flex:1;border:2px solid #d4dce8;border-radius:12px;padding:18px;text-align:center}
+.blue.on{background:#163ebd;color:white}.green.on{background:#126b3b;color:white}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}input{min-width:0;flex:1}
+#status{min-height:3em;line-height:1.6}small{color:#4b596c;line-height:1.6}
+</style>
+<main>
+<h1>Ameba Mini 語音控制 LED</h1>
+<p>按下麥克風，說「左邊開燈」或「右邊開燈」。</p>
+<div class="lights">
+  <div id="blue" class="light blue">左邊 · 藍燈<br><span>尚未確認</span></div>
+  <div id="green" class="light green">右邊 · 綠燈<br><span>尚未確認</span></div>
+</div>
+<div class="controls">
+<button id="windows-mic" type="button">🎤 電腦麥克風（本機辨識）</button>
+<button id="mic" type="button">📱 手機／Chrome 雲端辨識</button>
+</div>
+<p id="status" role="status" aria-live="polite">準備就緒。燈號顯示上一次板子確認的結果。</p>
+<form id="text-form" class="controls">
+<input id="text" aria-label="指令文字" placeholder="輸入指令以測試 USB" maxlength="100" required>
+<button type="submit">送出</button>
+</form>
+<div class="controls">
+<button data-command="左邊開燈">開藍燈</button>
+<button data-command="右邊開燈">開綠燈</button>
+<button data-command="全部關燈">全部關燈</button>
+</div>
+<small>也支援「左邊關燈」、「右邊關燈」、「全部關燈」。語音辨識依瀏覽器支援而定，可能透過網路傳送音訊至瀏覽器的辨識服務。手機請使用受信任的 HTTPS 網址。</small>
+</main>
+<script>
+const status = document.querySelector('#status');
+const mic = document.querySelector('#mic');
+const windowsMic = document.querySelector('#windows-mic');
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const voiceSupported = !!SpeechRecognition && window.isSecureContext;
+let busy = false, listening = false;
+function buttons() {
+  document.querySelectorAll('button').forEach(b => b.disabled = busy || listening);
+  mic.disabled = busy || listening || !voiceSupported;
+}
+function lamp(color, on) {
+  const el = document.querySelector('#' + color);
+  el.classList.toggle('on', on);
+  el.querySelector('span').textContent = on ? '已開燈' : '已關燈';
+}
+async function send(text) {
+  if (busy) return;
+  busy = true; buttons(); status.textContent = '指令：' + text + '，等待板子確認…';
+  try {
+    const response = await fetch('/api/command', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text}), signal:AbortSignal.timeout(8000)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '控制失敗');
+    if (data.command.startsWith('BLUE_')) lamp('blue', data.command === 'BLUE_ON');
+    if (data.command.startsWith('GREEN_')) lamp('green', data.command === 'GREEN_ON');
+    if (data.command === 'ALL_OFF') {lamp('blue', false); lamp('green', false);}
+    status.textContent = data.message;
+  } catch (error) {
+    status.textContent = '未能確認執行結果：' + error.message;
+    document.querySelectorAll('.light').forEach(el => {
+      el.classList.remove('on'); el.querySelector('span').textContent = '狀態未確認';
+    });
+  } finally {busy = false; buttons();}
+}
+async function listenLocally() {
+  if (busy || listening) return;
+  listening = true; buttons(); status.textContent = '正在聆聽，請在 7 秒內說出指令…';
+  try {
+    const response = await fetch('/api/listen', {method:'POST', signal:AbortSignal.timeout(15000)});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '語音辨識失敗');
+    document.querySelector('#text').value = data.text;
+    if (data.command.startsWith('BLUE_')) lamp('blue', data.command === 'BLUE_ON');
+    if (data.command.startsWith('GREEN_')) lamp('green', data.command === 'GREEN_ON');
+    if (data.command === 'ALL_OFF') {lamp('blue', false); lamp('green', false);}
+    status.textContent = data.message;
+  } catch (error) {
+    status.textContent = '本機語音辨識失敗：' + error.message;
+  } finally {listening = false; buttons();}
+}
+windowsMic.onclick = listenLocally;
+document.querySelector('#text-form').onsubmit = event => {
+  event.preventDefault(); if (!listening) send(document.querySelector('#text').value);
+};
+document.querySelectorAll('[data-command]').forEach(b => b.onclick = () => send(b.dataset.command));
+if (voiceSupported) {
+  const recognition = new SpeechRecognition();
+  recognition.lang = 'zh-TW'; recognition.continuous = false; recognition.interimResults = false;
+  recognition.maxAlternatives = 5;
+  let gotResult = false, failed = false;
+  mic.onclick = async () => {
+    gotResult = false; failed = false; listening = true; buttons();
+    status.textContent = '正在取得麥克風權限…';
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('瀏覽器無法存取麥克風');
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      stream.getTracks().forEach(track => track.stop());
+      status.textContent = '請說話…';
+      recognition.start();
+    } catch (error) {
+      listening = false; buttons(); status.textContent = '無法開始辨識：' + error.message;
+    }
+  };
+  recognition.onresult = event => {
+    if (gotResult) return;
+    gotResult = true;
+    const choices = Array.from(event.results[0]).map(item => item.transcript.trim());
+    const known = /^(左邊開燈|左邊開藍燈|藍燈開燈|開藍燈|打開左邊的燈|開啟左邊燈|右邊開燈|右邊開綠燈|綠燈開燈|開綠燈|打開右邊的燈|開啟右邊燈|左邊關燈|關藍燈|右邊關燈|關綠燈|全部關燈)$/;
+    const text = choices.find(choice => known.test(choice.replace(/[\s，。！？,.!?]/g, ''))) || choices[0];
+    document.querySelector('#text').value = text;
+    status.textContent = '辨識結果：' + choices.join('／') + '；正在傳送…';
+    send(text);
+  };
+  recognition.onerror = event => {
+    failed = true;
+    const errors = {'not-allowed':'請允許麥克風權限。','audio-capture':'找不到可用的麥克風。',
+      'network':'辨識服務連線失敗，請確認網路。','no-speech':'沒有聽到語音，請重試。',
+      'language-not-supported':'此辨識服務不支援繁體中文。'};
+    status.textContent = errors[event.error] || '語音辨識失敗：' + event.error;
+    if (event.error === 'network') {
+      status.textContent = 'Chrome 雲端辨識連線失敗，正在改用 Windows 本機辨識…';
+      listening = false; buttons();
+      setTimeout(listenLocally, 100);
+    }
+  };
+  recognition.onend = () => {
+    listening = false; buttons();
+    if (!gotResult && !failed) status.textContent = '沒有辨識結果，請再試一次。';
+  };
+} else {
+  status.textContent = window.isSecureContext ? '此瀏覽器不支援語音辨識，請改用支援的瀏覽器；仍可用文字或按鈕測試。' : '麥克風需要 HTTPS；電腦本機可使用 http://localhost:5000。';
+}
+buttons();
+</script>
+</html>
